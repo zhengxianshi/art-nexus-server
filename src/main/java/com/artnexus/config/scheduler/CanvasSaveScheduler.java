@@ -46,26 +46,53 @@ public class CanvasSaveScheduler {
                 Long currentSeq = redisTemplate.opsForValue().increment(seqKey, opCount);
                 if (currentSeq == null) continue;
 
-                // 构建快照 JSON（只保存操作列表，前端根据操作重放）
-                StringBuilder opsBuilder = new StringBuilder("[");
-                for (int i = 0; i < opCount; i++) {
+                // 读取 Redis 中已有的快照，将新操作追加进去（而非覆盖）
+                String snapshotKey = SNAPSHOT_KEY_PREFIX + roomId;
+                String existingRaw = (String) redisTemplate.opsForValue().get(snapshotKey);
+                com.fasterxml.jackson.databind.JsonNode existingSnapshot;
+                try {
+                    existingSnapshot = existingRaw != null
+                            ? objectMapper.readTree(existingRaw)
+                            : objectMapper.readTree("{\"actions\":[]}");
+                } catch (Exception e) {
+                    existingSnapshot = objectMapper.readTree("{\"actions\":[]}");
+                }
+
+                com.fasterxml.jackson.databind.node.ArrayNode actions =
+                        (com.fasterxml.jackson.databind.node.ArrayNode) existingSnapshot.get("actions");
+
+                // 暂存新增的操作（用于 MySQL 持久化）
+                StringBuilder newOpsBuilder = new StringBuilder("[");
+                int idx = 0;
+                while (redisTemplate.opsForList().size(opsKey) != null
+                        && redisTemplate.opsForList().size(opsKey) > 0) {
                     Object op = redisTemplate.opsForList().leftPop(opsKey);
                     if (op != null) {
-                        if (i > 0) opsBuilder.append(",");
-                        opsBuilder.append(op.toString());
+                        if (idx > 0) newOpsBuilder.append(",");
+                        newOpsBuilder.append(op.toString());
+                        // 追加到已有快照
+                        try {
+                            actions.add(objectMapper.readTree(op.toString()));
+                        } catch (Exception e) {
+                            log.warn("解析操作 JSON 失败", e);
+                        }
+                        idx++;
                     }
                 }
-                opsBuilder.append("]");
+                newOpsBuilder.append("]");
 
+                if (idx == 0) continue;
+
+                // MySQL 持久化（保存新增的这批操作）
                 CanvasSnapshot snapshot = new CanvasSnapshot();
                 snapshot.setRoomId(Long.parseLong(roomId));
-                snapshot.setSnapshotData(opsBuilder.toString());
+                snapshot.setSnapshotData(newOpsBuilder.toString());
                 snapshot.setLastOpSeq(currentSeq);
                 canvasSnapshotMapper.insert(snapshot);
 
-                // 更新 Redis 中最新的完整快照（格式和 updateSnapshot 保持一致）
-                redisTemplate.opsForValue().set(SNAPSHOT_KEY_PREFIX + roomId,
-                        "{\"actions\":" + opsBuilder.toString() + "}");
+                // 更新 Redis 快照 = 已有操作 + 新增操作
+                redisTemplate.opsForValue().set(snapshotKey,
+                        objectMapper.writeValueAsString(existingSnapshot));
 
                 log.debug("画布 roomId={} 自动保存: {} 条操作, seq={}", roomId, opCount, currentSeq);
             } catch (Exception e) {
