@@ -63,9 +63,9 @@ public class CanvasSaveScheduler {
                 snapshot.setLastOpSeq(currentSeq);
                 canvasSnapshotMapper.insert(snapshot);
 
-                // 更新 Redis 中最新的完整快照
+                // 更新 Redis 中最新的完整快照（格式和 updateSnapshot 保持一致）
                 redisTemplate.opsForValue().set(SNAPSHOT_KEY_PREFIX + roomId,
-                        opsBuilder.toString());
+                        "{\"actions\":" + opsBuilder.toString() + "}");
 
                 log.debug("画布 roomId={} 自动保存: {} 条操作, seq={}", roomId, opCount, currentSeq);
             } catch (Exception e) {
